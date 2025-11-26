@@ -49,6 +49,7 @@ class Boid{
             sep_weight=1.9f;
             align_weight=1.2f;
             cohesion_weight=0.8f;
+            obs_avoid_weight=2.0f;
         }
         vec3 ret_position(){
             return this->position;
@@ -70,10 +71,97 @@ class Boid{
             if(position.y<-100)position.y=100;
             acceleration=vec3(0); 
         }
-
 };
 
+class Obstacle{
+    public:
+        virtual bool isviewable(
+            Boid *specific_boid
+        )=0;
+        virtual vec3 avoid_force(Boid*specific_boid)=0;
+        virtual void draw()=0;
+        virtual ~Obstacle(){}
+};
+class circular_obs: public Obstacle{
+    vec3 center_point;
+    float radius;
+    public:circular_obs(const vec3& pos, float r)
+    : center_point(pos), radius(r) {}
+    bool isviewable(Boid *specific_boid) override{
+        vec3 dir=specific_boid->ret_velocity();
+        dir=normalize(dir);
+        vec3 pos=specific_boid->ret_position();
+        //the condition for viewablity is that dist<obs bubble.
+        float dist=length(pos-center_point);
+        if(dist>radius+specific_boid->vision_radius*4.5f) return false;
+        vec3 ptr_vector=center_point-pos;
+        float angle=acos(std::clamp(dot(dir,normalize(ptr_vector)),-1.0f,1.0f));
+        if(angle<specific_boid->vision_angle*0.5f){
+            return true;
+        }
+        return false;
+    }
+    vec3 avoid_force(Boid*specific_boid) override{
+        vec3 away=specific_boid->ret_position()-center_point;
+        float dist=length(away);
+        float max_dist=specific_boid->vision_radius+radius;
+        float penetration=pow((max_dist-dist)/max_dist,2.0f);
+        penetration=std::clamp(penetration,0.0f,1.0f);
+        return normalize(away)*penetration;
+    }
+    void draw()override{
+        glColor3f(0.0f,0.0f,1.0f);
+        glBegin(GL_LINE_LOOP);
+        for(int i=0;i<60;i++){
+            float theta=2.0f*M_PI*float(i)/60.0f;
+            float x=center_point.x+radius*cos(theta);
+            float y=center_point.y+radius*sin(theta);
+            glVertex2f(x,y);
+        }
+        glEnd();
+    }
+};
+class square_obs : public Obstacle{
+    vec3 center_point;
+    float side;
+    public:square_obs(const vec3&pos,float r):center_point(pos),side(r){}
+    bool isviewable(Boid *specific_boid)override{
+        vec3 pos = specific_boid->ret_position();
+        vec3 vel = normalize(specific_boid->ret_velocity());
+        if (length(vel)<1e-5)vel = vec3(1,0,0);
+        vec3 half(side/2.0f);
+        vec3 diff=pos-center_point;
+        vec3 closest =center_point+clamp(diff,-half,half);
+        float dist =length(pos-closest);   
+        if (dist > specific_boid->vision_radius) return false;
+        vec3 dir_to_obs=normalize(closest-pos);
+        float angle=acos(std::clamp(dot(vel, dir_to_obs),-1.0f,1.0f));
+        return angle<specific_boid->vision_angle*0.5f;
+    }
+    vec3 avoid_force(Boid *specific_boid)override{
+        vec3 pos = specific_boid->ret_position();
+        vec3 half(side/2.0f);
+        vec3 diff =pos-center_point;
+        vec3 closest=center_point+clamp(diff,-half,half);
+        float dist = length(pos-closest);
+        float strength=1.0f-(dist/specific_boid->vision_radius);
+        strength=std::clamp(strength, 0.0f, 1.0f);
+        vec3 away =normalize(pos-closest);
+        return away*strength;
+    }
+    void draw()override{
+        glColor3f(0.0f,0.0f,1.0f);  
+        float h =side/2.0f;
+        glBegin(GL_LINE_LOOP);
+        glVertex2f(center_point.x-h,center_point.y-h);
+        glVertex2f(center_point.x+h,center_point.y-h);
+        glVertex2f(center_point.x+h,center_point.y+h);
+        glVertex2f(center_point.x-h,center_point.y+h);
+        glEnd();
+    }
+};
 vector<Boid*>all_boids;//will be use to store all of the boids that are present.
+vector<Obstacle*>all_obstacles;
 
 vec3 norm(vec3 pos){
     float len = length(pos);
@@ -172,16 +260,31 @@ vec3 compute_cohesion(Boid* specific_boid,vector<Boid*>&neighbors){
     }
     return steer_acc*specific_boid->cohesion_weight;
 }
-vec3 compute_obstacle_avoidance(Boid* specific_boid) {
-    //fill this in.
-    return vec3(0);
+vec3 compute_obstacle_avoidance(Boid*b) {
+    vec3 total=vec3(0);
+    int count =0;
+    for (auto obs:all_obstacles) {
+        if (obs->isviewable(b)) {
+            vec3 f=obs->avoid_force(b);
+            total+=f;
+            count++;
+        }
+    }
+    if(count==0)return vec3(0);
+    total/=float(count);
+    total*=b->obs_avoid_weight;
+    if (length(total)>b->max_force){
+        total=normalize(total)*b->max_force;
+    }
+    return total;
 }
 void update_boid(Boid *specific_boid){
     vector<Boid*>neighbors=get_neighbors(specific_boid);
     vec3 sep=compute_seperation(specific_boid,neighbors);
     vec3 ali=compute_mean_vel_steer(specific_boid,neighbors);
     vec3 coh=compute_cohesion(specific_boid,neighbors);
-    vec3 acc=sep+ali+coh;
+    vec3 obj_mov=compute_obstacle_avoidance(specific_boid);
+    vec3 acc=sep+ali+coh+obj_mov;
     if(length(acc)>specific_boid->max_acc){
         acc = normalize(acc)*specific_boid->max_acc;
     }
@@ -211,6 +314,9 @@ void draw_boid(Boid*b){
 }
 void display(){
     glClear(GL_COLOR_BUFFER_BIT);
+    for(auto obs:all_obstacles){
+        obs->draw();
+    }
     for(auto &b: all_boids){
         draw_boid(b);
     }
@@ -242,6 +348,8 @@ int main(int argc,char**argv){
     glutInit(&argc,argv);
     glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB);
     glutInitWindowSize(windowWidth, windowHeight);
+    all_obstacles.push_back(new circular_obs(vec3(10.0f,20.0f,0.0f),30.0f));
+    //all_obstacles.push_back(new square_obs(vec3(50.0f,60.0f,0.0f),30.0f));
     glutCreateWindow("Boids Simulation");
     setup_opengl();
     init_boids(100);
